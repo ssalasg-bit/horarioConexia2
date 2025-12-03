@@ -158,6 +158,23 @@ $$ LANGUAGE plpgsql`,
 	BEFORE INSERT OR UPDATE ON docentes
 	FOR EACH ROW
 	EXECUTE FUNCTION sync_docentes_carrera_columns()`,
+		`CREATE TABLE IF NOT EXISTS docente_carrera (
+			docente_id VARCHAR(20) NOT NULL REFERENCES docentes(id) ON DELETE CASCADE,
+			carrera_id TEXT NOT NULL REFERENCES carreras(id) ON DELETE CASCADE,
+			prioridad INTEGER DEFAULT 1,
+			activo BOOLEAN NOT NULL DEFAULT TRUE,
+			PRIMARY KEY (docente_id, carrera_id)
+		)`,
+		'CREATE INDEX IF NOT EXISTS idx_docente_carrera_docente ON docente_carrera (docente_id)',
+		'CREATE INDEX IF NOT EXISTS idx_docente_carrera_carrera ON docente_carrera (carrera_id)',
+		`INSERT INTO docente_carrera (docente_id, carrera_id, prioridad, activo)
+		 SELECT d.id,
+		        COALESCE(d.carrera_id, d."carreraId"),
+		        1,
+		        COALESCE(d.activo, TRUE)
+		   FROM docentes d
+		  WHERE COALESCE(d.carrera_id, d."carreraId") IS NOT NULL
+		ON CONFLICT (docente_id, carrera_id) DO NOTHING`,
 		`CREATE OR REPLACE FUNCTION update_modified_column()
 		RETURNS TRIGGER AS $$
 		BEGIN

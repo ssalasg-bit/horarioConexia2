@@ -550,6 +550,9 @@
       padding: 10px 14px;
       cursor: move;
       user-select: none;
+      background: linear-gradient(135deg, var(--brand-orange, #f97316) 0%, #ff9f43 100%);
+      border-radius: 12px;
+      box-shadow: 0 12px 28px rgba(249, 115, 22, 0.2);
     }
 
     #modal-asignacion-manual .modal-asignacion-title {
@@ -1372,7 +1375,11 @@
             const o = document.createElement('option');
             o.value = d.id;
             o.textContent = d.nombre;
-            if (d.carreraId != null) o.dataset.carreraId = d.carreraId;
+            ensureDocenteCarreraMetadata(d);
+            const primaryCarrera = getDocentePrimaryCarreraId(d);
+            if (primaryCarrera != null) o.dataset.carreraId = primaryCarrera;
+            const carreraIds = getDocenteCarreraIds(d);
+            if (carreraIds.length) o.dataset.carreraIds = carreraIds.join(',');
             if (d.turno) o.dataset.turno = d.turno;
             const contratoHoras = d.contratoHoras ?? d.contrato;
             if (contratoHoras != null) o.dataset.contrato = contratoHoras;
@@ -1403,7 +1410,8 @@
         if (!docente) return '#cbd5f5';
         try {
           const carrerasSrc = Array.isArray(window.carreras) ? window.carreras : [];
-          const carrera = carrerasSrc.find(c => String(c.id) === String(docente.carreraId));
+          const primaryCarreraId = getDocentePrimaryCarreraId(docente);
+          const carrera = carrerasSrc.find(c => String(c.id) === String(primaryCarreraId));
           if (carrera) {
             const prefer = docente.turno === 'Vespertino' ? (carrera.colorVespertino || carrera.colorDiurno) : (carrera.colorDiurno || carrera.colorVespertino);
             if (prefer) return prefer;
@@ -1430,14 +1438,18 @@
         if (!docente && selectedOption) {
           const contratoFallbackRaw = selectedOption.dataset && selectedOption.dataset.contrato ? parseFloat(selectedOption.dataset.contrato) : null;
           const contratoFallback = Number.isFinite(contratoFallbackRaw) ? contratoFallbackRaw : null;
+          const carreraIdsRaw = selectedOption.dataset && selectedOption.dataset.carreraIds ? selectedOption.dataset.carreraIds.split(',').map((s) => s.trim()).filter(Boolean) : [];
           docente = {
             id: selectedOption.value,
             nombre: (selectedOption.textContent || '').trim(),
-            carreraId: selectedOption.dataset ? selectedOption.dataset.carreraId || null : null,
+            carreraId: selectedOption.dataset ? (selectedOption.dataset.carreraId || carreraIdsRaw[0] || null) : (carreraIdsRaw[0] || null),
+            carreraIds: carreraIdsRaw.slice(),
+            carrerasAsignadas: carreraIdsRaw.map((cid, idx) => ({ id: cid, prioridad: idx + 1, activo: true })),
             contratoHoras: contratoFallback,
             contrato: contratoFallback,
             turno: selectedOption.dataset ? selectedOption.dataset.turno || '' : ''
           };
+          ensureDocenteCarreraMetadata(docente);
         }
         if (!docente) {
           const hasOptions = !!(selDocente && selDocente.options && selDocente.options.length);
@@ -1464,7 +1476,10 @@
         }
         const horasLibres = contrato ? Math.max(0, contrato - horasAsignadas) : null;
         const carrera = (() => {
-          try { return (Array.isArray(window.carreras) ? window.carreras : []).find(c => String(c.id) === String(docente.carreraId)); } catch (_) { return null; }
+          try {
+            const primaryCarreraId = getDocentePrimaryCarreraId(docente);
+            return (Array.isArray(window.carreras) ? window.carreras : []).find(c => String(c.id) === String(primaryCarreraId));
+          } catch (_) { return null; }
         })();
         const partes = [];
         if (docente.nombre) partes.push(docente.nombre);
@@ -1619,11 +1634,100 @@
     const LOCAL_API_BASE = 'http://localhost:3001/api';
     const API_BASE_OVERRIDE_KEY = 'conexia_api_base_override';
 
-    // Sistema de bloques eliminado: volvemos a configuración genérica de intervalos de 30 minutos.
+    // Definición centralizada de bloques académicos (35 minutos por bloque)
+    const BLOCK_MINUTES = 35;
+    const BLOCK_DURATION_HOURS = BLOCK_MINUTES / 60;
+    const CEDUC_BLOQUES = [
+      { numero: 1, inicio: '08:30', fin: '09:05', duracion: BLOCK_MINUTES },
+      { numero: 2, inicio: '09:05', fin: '09:40', duracion: BLOCK_MINUTES },
+      { numero: 3, inicio: '09:50', fin: '10:25', duracion: BLOCK_MINUTES },
+      { numero: 4, inicio: '10:25', fin: '11:00', duracion: BLOCK_MINUTES },
+      { numero: 5, inicio: '11:10', fin: '11:45', duracion: BLOCK_MINUTES },
+      { numero: 6, inicio: '11:45', fin: '12:20', duracion: BLOCK_MINUTES },
+      { numero: 7, inicio: '12:30', fin: '13:05', duracion: BLOCK_MINUTES },
+      { numero: 8, inicio: '13:05', fin: '13:40', duracion: BLOCK_MINUTES },
+      { numero: 9, inicio: '13:50', fin: '14:25', duracion: BLOCK_MINUTES },
+      { numero: 10, inicio: '14:25', fin: '15:00', duracion: BLOCK_MINUTES },
+      { numero: 11, inicio: '15:10', fin: '15:45', duracion: BLOCK_MINUTES },
+      { numero: 12, inicio: '15:45', fin: '16:20', duracion: BLOCK_MINUTES },
+      { numero: 13, inicio: '16:30', fin: '17:05', duracion: BLOCK_MINUTES },
+      { numero: 14, inicio: '17:05', fin: '17:40', duracion: BLOCK_MINUTES },
+      { numero: 15, inicio: '17:50', fin: '18:25', duracion: BLOCK_MINUTES },
+      { numero: 16, inicio: '18:35', fin: '19:10', duracion: BLOCK_MINUTES },
+      { numero: 17, inicio: '19:10', fin: '19:45', duracion: BLOCK_MINUTES },
+      { numero: 18, inicio: '19:55', fin: '20:30', duracion: BLOCK_MINUTES },
+      { numero: 19, inicio: '20:30', fin: '21:05', duracion: BLOCK_MINUTES },
+      { numero: 20, inicio: '21:15', fin: '21:50', duracion: BLOCK_MINUTES },
+      { numero: 21, inicio: '21:50', fin: '22:25', duracion: BLOCK_MINUTES },
+      { numero: 22, inicio: '22:25', fin: '23:00', duracion: BLOCK_MINUTES }
+    ];
+    const CEDUC_BLOCKS = CEDUC_BLOQUES.map(b => ({ number: b.numero, start: b.inicio, end: b.fin, durationMinutes: b.duracion }));
+    const BLOCK_START_TIMES = Array.from(new Set(CEDUC_BLOQUES.map(b => b.inicio)));
+    if (typeof window !== 'undefined') {
+      try { window.CEDUC_BLOQUES = CEDUC_BLOQUES; } catch (_) { }
+      try { window.CEDUC_BLOCKS = CEDUC_BLOCKS; } catch (_) { }
+    }
+
+    function ensureDocenteCarreraMetadata(docente) {
+      if (!docente || docente.__carreraMetaNormalized) return docente;
+      const normalized = [];
+      const seen = new Set();
+      const addId = (value, activeFlag = true) => {
+        if (!activeFlag || value == null) return;
+        const str = String(value).trim();
+        if (!str || seen.has(str)) return;
+        seen.add(str);
+        normalized.push(str);
+      };
+      const assignments = [];
+      if (Array.isArray(docente.carrerasAsignadas)) {
+        docente.carrerasAsignadas.forEach((entry, idx) => {
+          if (!entry) return;
+          const rawId = entry.id ?? entry.carreraId ?? entry.carrera_id;
+          if (rawId == null) return;
+          const id = String(rawId).trim();
+          if (!id) return;
+          const activo = entry.activo === false ? false : true;
+          let prioridad = Number.isFinite(entry.prioridad) ? entry.prioridad : parseInt(entry.prioridad, 10);
+          if (!Number.isFinite(prioridad) || prioridad <= 0) prioridad = idx + 1;
+          assignments.push({ id, prioridad, activo });
+          addId(id, activo);
+        });
+      }
+      if (Array.isArray(docente.carreraIds)) {
+        docente.carreraIds.forEach((value) => addId(value, true));
+      }
+      addId(docente.carreraId, true);
+      addId(docente.carrera_id, true);
+      if (!assignments.length && normalized.length) {
+        normalized.forEach((id, idx) => assignments.push({ id, prioridad: idx + 1, activo: true }));
+      }
+      assignments.sort((a, b) => (a.prioridad || 0) - (b.prioridad || 0));
+      docente.carreraIds = normalized;
+      docente.carrerasAsignadas = assignments;
+      if (!docente.carreraId && normalized.length) docente.carreraId = normalized[0];
+      docente.__carreraMetaNormalized = true;
+      return docente;
+    }
+
+    function getDocenteCarreraIds(docente) {
+      ensureDocenteCarreraMetadata(docente);
+      return Array.isArray(docente?.carreraIds) ? docente.carreraIds : [];
+    }
+
+    function getDocentePrimaryCarreraId(docente) {
+      const ids = getDocenteCarreraIds(docente);
+      return ids.length ? ids[0] : null;
+    }
+
+    function docenteMatchesCarrera(docente, carreraId) {
+      if (!carreraId) return true;
+      const ids = getDocenteCarreraIds(docente);
+      const target = String(carreraId);
+      return ids.some((id) => String(id) === target);
+    }
+
     // Helpers sencillos para formatear horas.
-    const BLOCK_DURATION_MINUTES = 30;
-
-
     function pad2(num) {
       return String(num).padStart(2, '0');
     }
@@ -1640,18 +1744,11 @@
       return `${pad2(parseInt(match[1], 10))}:${match[2]}`;
     }
 
-    // Generador simple de opciones cada 30 minutos para selects de hora.
+    // Generador de opciones alineado a los bloques académicos definidos.
     function populateTimeSelect(selectEl) {
       if (!selectEl) return;
-      const opts = [];
-      for (let h = 8; h <= 22; h++) {
-        for (let m of [0, 30]) {
-          const hh = String(h).padStart(2, '0');
-          const mm = String(m).padStart(2, '0');
-          opts.push(`<option value="${hh}:${mm}">${hh}:${mm}</option>`);
-        }
-      }
-      selectEl.innerHTML = opts.join('');
+      const options = BLOCK_START_TIMES.map(time => `<option value="${time}">${time}</option>`);
+      selectEl.innerHTML = options.join('');
     }
 
     function normalizeApiBase(url) {
@@ -2227,7 +2324,6 @@
         const closeBtn = document.getElementById('manual-close');
         const cancelBtn = document.getElementById('manual-cancel');
         const deleteBtn = document.getElementById('manual-delete');
-        const BLOCK_MINUTES = 35;
         let selectionSnapshot = null;
 
         const pad = (value) => String(value).padStart(2, '0');
@@ -2382,6 +2478,11 @@
             const option = document.createElement('option');
             option.value = d.id;
             option.textContent = d.nombre || d.id;
+            ensureDocenteCarreraMetadata(d);
+            const primary = getDocentePrimaryCarreraId(d);
+            if (primary != null) option.dataset.carreraId = primary;
+            const carreraIds = getDocenteCarreraIds(d);
+            if (carreraIds.length) option.dataset.carreraIds = carreraIds.join(',');
             if (selectedId && String(d.id) === String(selectedId)) option.selected = true;
             docenteSelect.appendChild(option);
           });
@@ -2513,6 +2614,11 @@
             const option = document.createElement('option');
             option.value = d.id;
             option.textContent = d.nombre || d.id;
+            ensureDocenteCarreraMetadata(d);
+            const primary = getDocentePrimaryCarreraId(d);
+            if (primary != null) option.dataset.carreraId = primary;
+            const carreraIds = getDocenteCarreraIds(d);
+            if (carreraIds.length) option.dataset.carreraIds = carreraIds.join(',');
             if (selectedId && String(d.id) === String(selectedId)) option.selected = true;
             docenteSelect.appendChild(option);
           });
@@ -2845,10 +2951,23 @@
       }
 
       async function fetchDocentes() {
-        if (!USE_API) return load(KEY_DOCENTES, []);
+        if (!USE_API) {
+          const docs = load(KEY_DOCENTES, []) || [];
+          return docs.map((item) => {
+            if (!item) return item;
+            ensureDocenteCarreraMetadata(item);
+            return item;
+          });
+        }
         try {
           const r = await authorizedFetch(API_BASE + '/docentes');
-          return r.ok ? await r.json() : [];
+          const data = r.ok ? await r.json() : [];
+          return (data || []).map((item) => {
+            if (!item) return item;
+            const doc = { ...item };
+            ensureDocenteCarreraMetadata(doc);
+            return doc;
+          });
         } catch (err) {
           console.error('fetchDocentes falló', err);
           return [];
@@ -3521,32 +3640,7 @@
           });
           try { if (calendar) calendar.render(); } catch (err) { console.error('Calendar render error', err); runtimeErrorEl.textContent = 'Error renderizando el calendario: ' + err.message; runtimeErrorEl.style.display = 'block'; }
           // SISTEMA DE BLOQUES CEDUC - NO VALORES DECIMALES
-          const CEDUC_BLOQUES = [
-            { numero: 1, inicio: '08:30', fin: '09:05', duracion: 35 },
-            { numero: 2, inicio: '09:05', fin: '09:40', duracion: 35 },
-            { numero: 3, inicio: '09:50', fin: '10:25', duracion: 35 },
-            { numero: 4, inicio: '10:25', fin: '11:00', duracion: 35 },
-            { numero: 5, inicio: '11:10', fin: '11:45', duracion: 35 },
-            { numero: 6, inicio: '11:45', fin: '12:20', duracion: 35 },
-            { numero: 7, inicio: '12:30', fin: '13:05', duracion: 35 },
-            { numero: 8, inicio: '13:05', fin: '13:40', duracion: 35 },
-            { numero: 9, inicio: '13:50', fin: '14:25', duracion: 35 },
-            { numero: 10, inicio: '14:25', fin: '15:00', duracion: 35 },
-            { numero: 11, inicio: '15:10', fin: '15:45', duracion: 35 },
-            { numero: 12, inicio: '15:45', fin: '16:20', duracion: 35 },
-            { numero: 13, inicio: '16:30', fin: '17:05', duracion: 35 },
-            { numero: 14, inicio: '17:05', fin: '17:40', duracion: 35 },
-            { numero: 15, inicio: '17:50', fin: '18:25', duracion: 35 },
-            { numero: 16, inicio: '18:35', fin: '19:10', duracion: 35 },
-            { numero: 17, inicio: '19:10', fin: '19:45', duracion: 35 },
-            { numero: 18, inicio: '19:55', fin: '20:30', duracion: 35 },
-            { numero: 19, inicio: '20:30', fin: '21:05', duracion: 35 },
-            { numero: 20, inicio: '21:15', fin: '21:50', duracion: 35 },
-            { numero: 21, inicio: '21:50', fin: '22:25', duracion: 35 },
-            { numero: 22, inicio: '22:25', fin: '23:00', duracion: 35 }
-          ];
           try { window.CEDUC_BLOQUES = CEDUC_BLOQUES; } catch (_) { }
-          const CEDUC_BLOCKS = CEDUC_BLOQUES.map(b => ({ number: b.numero, start: b.inicio, end: b.fin, durationMinutes: b.duracion }));
           try { window.CEDUC_BLOCKS = CEDUC_BLOCKS; } catch (_) { }
           function calcularNumeroBloque(fechaHora) {
             const hora = fechaHora.getHours();
@@ -4140,7 +4234,7 @@
             btnEliminar.addEventListener('click', () => {
               // Verificar si tiene módulos asociados
               const modulosAsociados = modulos.filter(m => m.carreraId === c.id);
-              const docentesAsociados = docentes.filter(d => d.carreraId === c.id);
+              const docentesAsociados = docentes.filter(d => docenteMatchesCarrera(d, c.id));
               const eventosAsociados = storedEvents.filter(e => {
                 const meta = (e.extendedProps && e.extendedProps.__meta) || {};
                 const modulo = modulos.find(m => m.id === meta.moduloId);
@@ -4163,9 +4257,16 @@
 
                 // Desvincular docentes (cambiar carreraId a null)
                 docentes.forEach(d => {
-                  if (d.carreraId === c.id) {
-                    d.carreraId = null;
+                  ensureDocenteCarreraMetadata(d);
+                  const ids = getDocenteCarreraIds(d);
+                  if (!ids.some(id => String(id) === String(c.id))) return;
+                  d.carrerasAsignadas = (d.carrerasAsignadas || []).filter(entry => String(entry.id) !== String(c.id));
+                  d.carreraIds = ids.filter(id => String(id) !== String(c.id));
+                  if (d.carreraId && String(d.carreraId) === String(c.id)) {
+                    d.carreraId = d.carreraIds.length ? d.carreraIds[0] : null;
                   }
+                  d.__carreraMetaNormalized = false;
+                  ensureDocenteCarreraMetadata(d);
                 });
 
                 // Eliminar eventos asociados
@@ -4399,7 +4500,7 @@
       function openListDocentesModal(carreraId) {
         try {
           const body = document.getElementById('list-docentes-modal-body'); body.innerHTML = '';
-          const items = docentes.filter(d => !carreraId || d.carreraId === carreraId);
+          const items = docentes.filter(d => !carreraId || docenteMatchesCarrera(d, carreraId));
           if (items.length === 0) { body.innerHTML = '<div>No hay docentes para la carrera seleccionada.</div>'; }
           items.forEach(d => {
             const div = document.createElement('div');
@@ -4410,7 +4511,8 @@
             div.style.alignItems = 'center';
 
             const infoDiv = document.createElement('div');
-            const carrName = (carreras.find(c => c.id === d.carreraId) || {}).nombre || '(sin)';
+            const primaryId = getDocentePrimaryCarreraId(d);
+            const carrName = (carreras.find(c => c.id === primaryId) || {}).nombre || '(sin)';
             infoDiv.innerHTML = `<div style="font-weight:600">${d.nombre}</div><div style="font-size:13px">RUT:${d.rut} • Contrato:${d.contratoHoras || 24}h • Carrera: ${carrName}</div>`;
 
             // Botón Ver detalles
@@ -4448,13 +4550,46 @@
                 modal.setAttribute('role', 'dialog');
                 const closeBtn = document.createElement('button');
                 closeBtn.textContent = 'Cerrar';
-                closeBtn.style.position = 'absolute';
-                closeBtn.style.top = '10px';
-                closeBtn.style.right = '14px';
                 closeBtn.addEventListener('click', () => { try { document.body.removeChild(modal); } catch (_) { } });
                 const fields = Object.entries(detail).map(([k, v]) => `<tr><td style='font-weight:600;padding:6px 10px;border-bottom:1px solid #eef;'>${k}</td><td style='padding:6px 10px;border-bottom:1px solid #eef;'>${v == null ? '' : v}</td></tr>`).join('');
-                modal.innerHTML = `<h3 style='margin:0 0 12px;font-size:20px;'>Datos del Docente</h3><table style='width:100%;border-collapse:collapse;font-size:13px;'>${fields}</table>`;
-                modal.appendChild(closeBtn);
+                modal.innerHTML = '';
+                const header = document.createElement('div');
+                header.style.display = 'flex';
+                header.style.alignItems = 'center';
+                header.style.justifyContent = 'space-between';
+                header.style.gap = '12px';
+                header.style.padding = '16px 20px';
+                header.style.margin = '-20px -20px 16px';
+                header.style.background = 'linear-gradient(135deg, var(--brand-orange, #f97316) 0%, #ff9f43 100%)';
+                header.style.color = '#fff';
+                header.style.fontSize = '18px';
+                header.style.fontWeight = '600';
+                header.style.borderTopLeftRadius = '16px';
+                header.style.borderTopRightRadius = '16px';
+                const headerTitle = document.createElement('span');
+                headerTitle.textContent = 'Detalles del docente';
+                header.appendChild(headerTitle);
+                closeBtn.textContent = 'Cerrar';
+                closeBtn.style.position = 'static';
+                closeBtn.style.top = '';
+                closeBtn.style.right = '';
+                closeBtn.style.margin = '0';
+                closeBtn.style.background = 'rgba(255, 255, 255, 0.22)';
+                closeBtn.style.color = '#fff';
+                closeBtn.style.border = 'none';
+                closeBtn.style.borderRadius = '999px';
+                closeBtn.style.padding = '6px 14px';
+                closeBtn.style.fontSize = '13px';
+                closeBtn.style.cursor = 'pointer';
+                closeBtn.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.25)';
+                header.appendChild(closeBtn);
+                const content = document.createElement('div');
+                content.style.maxHeight = '60vh';
+                content.style.overflowY = 'auto';
+                content.style.paddingRight = '6px';
+                content.innerHTML = `<table style='width:100%;border-collapse:collapse;font-size:13px;'>${fields}</table>`;
+                modal.appendChild(header);
+                modal.appendChild(content);
                 document.body.appendChild(modal);
               } catch (err) {
                 console.error('ver detalles docente (modal list)', err);
@@ -4652,7 +4787,8 @@
           const li = document.createElement('li');
           const weekRange = getWeekRange();
           const weeklyAssigned = computeAssignedHoursForDocente(d.id, weekRange[0], weekRange[1]);
-          const carreraName = (carreras.find(c => c.id === d.carreraId) || {}).nombre || '(sin)';
+          const primaryId = getDocentePrimaryCarreraId(d);
+          const carreraName = (carreras.find(c => c.id === primaryId) || {}).nombre || '(sin)';
           const contratoSemanalMostrar = (d.ContratoHoraSemanal != null ? d.ContratoHoraSemanal : d.contratoHoras) || 0;
           li.innerHTML = `<strong>${d.nombre}</strong> (RUT:${d.rut}) - Carrera:${carreraName} - Edad:${d.edad ?? ''} - EstadoCivil:${d.estadoCivil ?? ''} - Contrato semanal:${contratoSemanalMostrar}h - Asignadas (semana):${weeklyAssigned.toFixed(1)}h - Total asignadas:${d.horasAsignadas || 0}h - Trabajadas:${d.horasTrabajadas || 0}h - Turno:${d.turno || 'Diurno'} - Activo:${d.activo ? 'Sí' : 'No'}`;
 
@@ -4668,10 +4804,47 @@
               const modal = document.createElement('div');
               modal.style.position = 'fixed'; modal.style.left = '50%'; modal.style.top = '50%'; modal.style.transform = 'translate(-50%, -50%)';
               modal.style.background = '#fff'; modal.style.color = '#0f172a'; modal.style.padding = '20px'; modal.style.borderRadius = '16px'; modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.35)'; modal.style.width = 'min(520px,94vw)'; modal.style.maxHeight = '80vh'; modal.style.overflowY = 'auto'; modal.style.zIndex = '13000';
-              const cerrar = document.createElement('button'); cerrar.textContent = 'Cerrar'; cerrar.style.position = 'absolute'; cerrar.style.top = '10px'; cerrar.style.right = '14px'; cerrar.addEventListener('click', () => { document.body.removeChild(modal); });
+              const cerrar = document.createElement('button');
+              cerrar.textContent = 'Cerrar';
+              cerrar.addEventListener('click', () => { document.body.removeChild(modal); });
               const fields = Object.entries(detail).map(([k, v]) => `<tr><td style='font-weight:600;padding:6px 10px;border-bottom:1px solid #eef;'>${k}</td><td style='padding:6px 10px;border-bottom:1px solid #eef;'>${v == null ? '' : v}</td></tr>`).join('');
-              modal.innerHTML = `<h3 style='margin:0 0 12px;font-size:20px;'>Datos del Docente</h3><table style='width:100%;border-collapse:collapse;font-size:13px;'>${fields}</table>`;
-              modal.appendChild(cerrar);
+              cerrar.style.position = 'static';
+              cerrar.style.top = '';
+              cerrar.style.right = '';
+              cerrar.style.margin = '0';
+              cerrar.style.background = 'rgba(255, 255, 255, 0.22)';
+              cerrar.style.color = '#fff';
+              cerrar.style.border = 'none';
+              cerrar.style.borderRadius = '999px';
+              cerrar.style.padding = '6px 14px';
+              cerrar.style.fontSize = '13px';
+              cerrar.style.cursor = 'pointer';
+              cerrar.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.25)';
+              modal.innerHTML = '';
+              const header = document.createElement('div');
+              header.style.display = 'flex';
+              header.style.alignItems = 'center';
+              header.style.justifyContent = 'space-between';
+              header.style.gap = '12px';
+              header.style.padding = '16px 20px';
+              header.style.margin = '-20px -20px 16px';
+              header.style.background = 'linear-gradient(135deg, var(--brand-orange, #f97316) 0%, #ff9f43 100%)';
+              header.style.color = '#fff';
+              header.style.fontSize = '18px';
+              header.style.fontWeight = '600';
+              header.style.borderTopLeftRadius = '16px';
+              header.style.borderTopRightRadius = '16px';
+              const headerTitle = document.createElement('span');
+              headerTitle.textContent = 'Detalles del docente';
+              header.appendChild(headerTitle);
+              header.appendChild(cerrar);
+              const content = document.createElement('div');
+              content.style.maxHeight = '60vh';
+              content.style.overflowY = 'auto';
+              content.style.paddingRight = '6px';
+              content.innerHTML = `<table style='width:100%;border-collapse:collapse;font-size:13px;'>${fields}</table>`;
+              modal.appendChild(header);
+              modal.appendChild(content);
               document.body.appendChild(modal);
             } catch (err) { console.error('ver datos docente error', err); alert('No se pudo cargar el detalle del docente.'); }
           });
@@ -4936,7 +5109,7 @@
       const assignSemesterHint = document.getElementById('assign-semester-hint');
       document.getElementById('assign-cancel').addEventListener('click', () => toggleAssignModal(false));
 
-      // Usar select genérico de intervalos de 30 minutos
+      // Opciones alineadas a los inicios de bloque CEDUC
       populateTimeSelect(assignTimeInput);
       if (assignTimeInput && !assignTimeInput.value) {
         assignTimeInput.value = CEDUC_BLOCKS[0]?.start || '';
@@ -5231,11 +5404,22 @@
         if (!modulo) { alert('Módulo no encontrado'); return; }
         // populate docentes select: only docentes belonging to this modulo's carrera
         assignDocenteSel.innerHTML = '';
-        const availableDocs = docentes.filter(d => d.carreraId === modulo.carreraId && d.activo);
+        const availableDocs = docentes.filter(d => d.activo && docenteMatchesCarrera(d, modulo.carreraId));
+        const appendDocOption = (doc, suffix = '') => {
+          const opt = document.createElement('option');
+          opt.value = doc.id;
+          opt.text = `${doc.nombre} (${doc.rut})${suffix}`.trim();
+          ensureDocenteCarreraMetadata(doc);
+          const primary = getDocentePrimaryCarreraId(doc);
+          if (primary != null) opt.dataset.carreraId = primary;
+          const carreraIds = getDocenteCarreraIds(doc);
+          if (carreraIds.length) opt.dataset.carreraIds = carreraIds.join(',');
+          assignDocenteSel.appendChild(opt);
+        };
         if (availableDocs.length === 0) { // fallback: show all active docentes but mark that none share career
-          docentes.filter(d => d.activo).forEach(d => { const opt = document.createElement('option'); opt.value = d.id; opt.text = `${d.nombre} (${d.rut}) ${d.activo ? '' : '(desvinculado)'}`; assignDocenteSel.appendChild(opt); });
+          docentes.filter(d => d.activo).forEach(d => appendDocOption(d, ' (otras carreras)'));
         } else {
-          availableDocs.forEach(d => { const opt = document.createElement('option'); opt.value = d.id; opt.text = `${d.nombre} (${d.rut})`; assignDocenteSel.appendChild(opt); });
+          availableDocs.forEach(d => appendDocOption(d));
         }
         // populate salas
         assignSalaSel.innerHTML = '<option value="">(ninguna)</option>';
@@ -6079,8 +6263,8 @@
         const viableDocentes = docentes.filter(d => d.activo).slice();
         // prefer docentes from same career first, then by fewest assigned hours
         viableDocentes.sort((a, b) => {
-          const aSame = (a.carreraId === modulo.carreraId) ? 0 : 1;
-          const bSame = (b.carreraId === modulo.carreraId) ? 0 : 1;
+          const aSame = docenteMatchesCarrera(a, modulo.carreraId) ? 0 : 1;
+          const bSame = docenteMatchesCarrera(b, modulo.carreraId) ? 0 : 1;
           if (aSame !== bSame) return aSame - bSame;
           // then ascending assigned hours
           return computeAssignedHoursForDocente(a.id) - computeAssignedHoursForDocente(b.id);
@@ -6336,7 +6520,7 @@
 
             function findDocenteFor(shift, duration, dateIso, draftEvents) {
               const candidates = docentes.filter(d => d.activo && d.turno === shift).sort((a, b) => {
-                const aSame = a.carreraId === carreraId ? 0 : 1; const bSame = b.carreraId === carreraId ? 0 : 1; if (aSame !== bSame) return aSame - bSame;
+                const aSame = docenteMatchesCarrera(a, carreraId) ? 0 : 1; const bSame = docenteMatchesCarrera(b, carreraId) ? 0 : 1; if (aSame !== bSame) return aSame - bSame;
                 return computeAssignedHoursForDocente(a.id, weekRange[0], weekRange[1]) + docenteDraftHours(a.id, draftEvents) - (computeAssignedHoursForDocente(b.id, weekRange[0], weekRange[1]) + docenteDraftHours(b.id, draftEvents));
               });
               for (const d of candidates) {
@@ -7431,7 +7615,7 @@
 
               // Map domain objects to flat records for Excel
               addSheet('Docentes', (docentes || []).map(d => ({
-                id: d.id, rut: d.rut, nombre: d.nombre, edad: d.edad, estadoCivil: d.estadoCivil, contratoHoras: d.contratoHoras, horasAsignadas: d.horasAsignadas, horasTrabajadas: d.horasTrabajadas, turno: d.turno, activo: d.activo, carreraId: d.carreraId
+                id: d.id, rut: d.rut, nombre: d.nombre, edad: d.edad, estadoCivil: d.estadoCivil, contratoHoras: d.contratoHoras, horasAsignadas: d.horasAsignadas, horasTrabajadas: d.horasTrabajadas, turno: d.turno, activo: d.activo, carreraId: getDocentePrimaryCarreraId(d), carreras: getDocenteCarreraIds(d).join(',')
               })));
 
               addSheet('Carreras', (carreras || []).map(c => ({ id: c.id, nombre: c.nombre, totalHoras: c.totalHoras, practicaHoras: c.practicaHoras, teoricaHoras: c.teoricaHoras, colorDiurno: c.colorDiurno, colorVespertino: c.colorVespertino })));
@@ -7873,7 +8057,7 @@
     <div class="modal-asignacion" role="dialog" aria-modal="true" aria-labelledby="manual-modal-title"
       data-drag-handle=".modal-asignacion-header">
       <div class="modal-asignacion-header modal-drag-handle">
-        <h3 id="manual-modal-title" class="modal-asignacion-title modal-drag-title">Asignar Evento Manual</h3>
+        <h3 id="manual-modal-title" class="modal-asignacion-title modal-drag-title">Asignacion manual de bloque</h3>
         <button type="button" id="manual-close" class="modal-asignacion-close modal-close-btn"
           aria-label="Cerrar">×</button>
       </div>
