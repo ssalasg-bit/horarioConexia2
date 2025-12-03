@@ -186,6 +186,57 @@
       letter-spacing: 0.5px !important;
     }
 
+    .evento-wrapper {
+      position: relative;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .evento-expand-toggle {
+      position: absolute;
+      top: 4px;
+      right: 6px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(255, 255, 255, 0.25);
+      color: #111827;
+      font-size: 14px;
+      line-height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+
+    .evento-expand-toggle:hover {
+      transform: scale(1.1);
+    }
+
+    .evento-detalles {
+      display: none;
+      font-size: 11px;
+      line-height: 1.4;
+      color: #f1f5f9;
+      margin-top: 4px;
+      padding-top: 4px;
+      border-top: 1px solid rgba(255, 255, 255, 0.3);
+    }
+
+    .fc-event.expanded .evento-detalles {
+      display: block;
+    }
+
+    .evento-detalle-line {
+      font-size: 11px;
+      margin-bottom: 2px;
+      display: block;
+    }
+
     /* ESTILOS PARA TOOLTIPS */
     .evento-tooltip {
       font-family: 'Inter', sans-serif;
@@ -2717,11 +2768,14 @@
                 }
               });
             }
+            const payloadById = new Map(payloads.map(entry => [String(entry.id), entry]));
             let created = 0;
+            const createdEvents = [];
             payloads.forEach(def => {
               try {
                 const added = calendar.addEvent(def);
                 if (added) created += 1;
+                if (added) createdEvents.push(added);
               } catch (err) {
                 console.error('Error agregando bloque manual', err);
               }
@@ -2729,6 +2783,45 @@
             if (!created) {
               alert('No se pudo crear el bloque manual. Revisa si existen conflictos.');
               return;
+            }
+            try {
+              const persisted = [];
+              createdEvents.forEach(evt => {
+                const base = payloadById.get(String(evt.id));
+                const startIso = evt.start ? evt.start.toISOString() : (base && base.start) || null;
+                const endIso = evt.end ? evt.end.toISOString() : (base && base.end) || null;
+                const meta = (evt.extendedProps && evt.extendedProps.__meta) || (base && base.extendedProps && base.extendedProps.__meta) || {};
+                const storeEntry = {
+                  id: evt.id,
+                  title: evt.title,
+                  start: startIso,
+                  end: endIso,
+                  editable: true,
+                  extendedProps: { __meta: meta }
+                };
+                try { realignToBlockRange(storeEntry); } catch (alignErr) { console.warn('No se pudo alinear evento manual recién creado', alignErr); }
+                const existingIdx = storedEvents.findIndex(se => String(se.id) === String(storeEntry.id));
+                if (existingIdx === -1) {
+                  storedEvents.push(storeEntry);
+                } else {
+                  const existing = storedEvents[existingIdx] || {};
+                  storedEvents[existingIdx] = {
+                    ...existing,
+                    ...storeEntry,
+                    extendedProps: {
+                      ...(existing.extendedProps || {}),
+                      ...(storeEntry.extendedProps || {})
+                    }
+                  };
+                }
+                persisted.push(storeEntry);
+              });
+              if (persisted.length) {
+                persistEventsAndValidate();
+              }
+            } catch (persistErr) {
+              console.error('Persistencia de bloque manual falló', persistErr);
+              alert('El bloque se agregó al calendario, pero no se pudo guardar. Revisa la consola para más detalles.');
             }
             closeModal();
             if (calendar && typeof calendar.unselect === 'function') {
@@ -3079,8 +3172,12 @@
             eventContent: function (arg) {
               try {
                 const parts = buildEventTitleParts(arg.event);
+                const details = buildEventDetailHtml(arg.event);
                 const codigoHtml = parts.codigo ? `<div class="evento-codigo">${parts.codigo}</div>` : '';
-                return { html: `<div class="evento-nombre">${parts.nombre}</div>${codigoHtml}` };
+                const expandBtn = `<button type="button" class="evento-expand-toggle" aria-label="Expandir detalles" aria-expanded="false">+</button>`;
+                return {
+                  html: `<div class="evento-wrapper">${expandBtn}<div class="evento-nombre">${parts.nombre}</div>${codigoHtml}<div class="evento-detalles" aria-hidden="true">${details}</div></div>`
+                };
               } catch (_) {
                 return { text: arg.event.title };
               }
@@ -3622,13 +3719,52 @@
                 } catch (err) { console.error('eventResize capacity check error', err); }
 
                 const idx = storedEvents.findIndex(se => se.id === ev.id);
+                const durationMs = endIso && startIso ? (new Date(endIso).getTime() - new Date(startIso).getTime()) : 0;
+                const durationHours = Math.max(0, durationMs / (1000 * 60 * 60));
                 if (idx !== -1) {
-                  storedEvents[idx].start = startIso;
-                  storedEvents[idx].end = endIso;
-                  // ensureEventBlockMeta eliminado
-                  ev.setExtendedProp('__meta', storedEvents[idx].extendedProps.__meta);
+                  const existing = storedEvents[idx] || {};
+                  const mergedMeta = {
+                    ...(((existing.extendedProps || {}).__meta) || {}),
+                    ...(((ev.extendedProps || {}).__meta) || {})
+                  };
+                  mergedMeta.horas = durationHours;
+                  storedEvents[idx] = {
+                    ...existing,
+                    start: startIso,
+                    end: endIso,
+                    extendedProps: {
+                      ...(existing.extendedProps || {}),
+                      ...(ev.extendedProps || {}),
+                      __meta: mergedMeta
+                    }
+                  };
+                  ev.setExtendedProp('__meta', mergedMeta);
                   persistEventsAndValidate();
-                  console.log('Evento redimensionado exitosamente:', storedEvents[idx].title);
+                  console.log('Event resize persisted for existing entry:', storedEvents[idx].title);
+                } else {
+                  console.warn('Event not found in storedEvents during resize, adding:', ev.id);
+                  const newStoredEvent = {
+                    id: ev.id,
+                    title: ev.title,
+                    start: startIso,
+                    end: endIso,
+                    backgroundColor: ev.backgroundColor || (ev.extendedProps && ev.extendedProps.backgroundColor) || '#3788d8',
+                    borderColor: ev.borderColor || (ev.extendedProps && ev.extendedProps.borderColor) || '#3788d8',
+                    textColor: ev.textColor || (ev.extendedProps && ev.extendedProps.textColor) || '#fff',
+                    editable: true,
+                    extendedProps: {
+                      ...(ev.extendedProps || {}),
+                      __meta: {
+                        ...(((ev.extendedProps || {}).__meta) || {}),
+                        horas: durationHours
+                      }
+                    }
+                  };
+                  try { realignToBlockRange(newStoredEvent); } catch (alignErr) { console.warn('Unable to realign newly resized event', alignErr); }
+                  storedEvents.push(newStoredEvent);
+                  ev.setExtendedProp('__meta', newStoredEvent.extendedProps.__meta);
+                  persistEventsAndValidate();
+                  console.log('Event resize persisted for new entry:', newStoredEvent.title);
                 }
                 console.debug('eventResize completed, storedEvents.length=', storedEvents.length);
               } catch (e) {
@@ -3830,6 +3966,49 @@
             const nombre = formatearTituloEvento(evento);
             const codigo = (modulo && modulo.codigo) ? modulo.codigo : '';
             return { nombre, codigo };
+          }
+
+          function buildEventDetailHtml(evento) {
+            const meta = (evento.extendedProps && evento.extendedProps.__meta) || {};
+            const lines = [];
+            const addLine = (label, value) => {
+              if (!value) return;
+              const safeText = String(value).replace(/\s+/g, ' ').trim();
+              if (!safeText) return;
+              lines.push(`<span class="evento-detalle-line"><strong>${label}:</strong> ${safeText}</span>`);
+            };
+            const modulo = meta.moduloId ? modulos.find(m => m.id === meta.moduloId) : null;
+            if (modulo) {
+              addLine('Módulo', modulo.nombre || modulo.id);
+              addLine('Código', modulo.codigo || modulo.id);
+            }
+            if (meta.docenteId) {
+              const docente = docentes.find(d => d.id === meta.docenteId);
+              addLine('Docente', docente ? docente.nombre : meta.docenteId);
+            }
+            if (meta.salaId) {
+              const sala = salas.find(s => s.id === meta.salaId);
+              addLine('Sala', sala ? sala.nombre : meta.salaId);
+            }
+            if (meta.carreraId) {
+              const carrera = carreras.find(c => c.id === meta.carreraId);
+              addLine('Carrera', carrera ? carrera.nombre : meta.carreraId);
+            }
+            if (meta.numeroBloque) {
+              addLine('Bloque CEDUC', meta.numeroBloque);
+            }
+            if (typeof meta.bloques === 'number' && meta.bloques > 0) {
+              addLine('Duración', `${meta.bloques} bloque(s)`);
+            } else if (meta.horas) {
+              addLine('Duración', `${meta.horas} hora(s)`);
+            }
+            if (meta.descripcion) {
+              addLine('Descripción', meta.descripcion);
+            }
+            if (!lines.length) {
+              lines.push('<span class="evento-detalle-line">Sin detalles adicionales</span>');
+            }
+            return lines.join('');
           }
 
           // ===== Conflictos por bloque y día =====
